@@ -14,6 +14,7 @@ batchSize = 2
 seqLength = 5
 mDim = 8
 nHeads = 2
+ffDim = 3
 Q = torch.randn(batchSize, seqLength, mDim)
 K = torch.randn(batchSize, seqLength, mDim)
 V = torch.randn(batchSize, seqLength, mDim)
@@ -22,16 +23,96 @@ print(Fore.YELLOW + 'Batch Size:', Fore.CYAN + str(batchSize))
 print(Fore.YELLOW + 'Sequence Length:', Fore.CYAN + str(seqLength))
 print(Fore.YELLOW + 'Model Dimensions:', Fore.CYAN + str(mDim))
 print(Fore.YELLOW + 'Number of Heads:', Fore.CYAN + str(nHeads))
+print(Fore.YELLOW + 'Number of FFDim:', Fore.CYAN + str(ffDim))
 print(Fore.BLUE + 'Shape of K, Q, V Tensors:', Fore.RED + str(Q.shape))
 
-# TODO! Positional Embedding + Linear
+# Positional Embedding 
+class PerPositionFeedForward(nn.Module):
+    def __init__(self, mDim: int, ffDim: int) -> None:
+        '''
+        We use this feed forward network instead of simple FF throughout the whole code
+        `mDim:` dimensionality of the model's input & output
+        `ffDim:` dimensionality of inner feed-forward layer
+        `IMPORTANT:` this feed-forward network is applied to each `position`
+        separately and identically
+        '''
+        super(PerPositionFeedForward, self).__init__()
+        self.fc1 = nn.Linear(mDim, ffDim)
+        self.fc2 = nn.Linear(ffDim, mDim)
+        self.relu = nn.ReLU()
+
+    def forward(self, X: Tensor) -> Tensor:
+        '''
+                    ▲
+                   (+) <--------  Positional Embedding
+                    ▲
+            ┌──────────────┐ 
+            │ feed-forward │ 
+            └──────────────┘
+                    ▲
+                  inputs
+        '''
+        string = '[PerPositionFeedForward STARTED!]'
+        print(Fore.YELLOW + string, (80 - len(string)) * '-')
+        print(Fore.BLUE + 'X Shape:', Fore.RED + str(X.shape))
+        out = self.fc2(self.relu(self.fc1(X)))
+        print(Fore.BLUE + 'Output Shape:', Fore.RED + str(out.shape))
+        print(out)
+        return out
+
+# Tests
+# ppff = PerPositionFeedForward(mDim, ffDim)
+# ppff.forward(x)
+
+class PositionalEmbedding(nn.Module):
+    def __init__(self, mDim: int, maxSeqLen: int) -> None:
+        '''
+        Positional Encoding is used to `inject` the position information of each token in 
+        the input sequence. It uses `sine` and `cosine` functions of different frequencies
+        to generate the positional encoding.
+        `mDim:` dimensionality of the model's input & output
+        `maxSeqLen:` maximum sequence length
+        '''
+        super(PositionalEmbedding, self).__init__()
+        string = '[PositionalEncoding]'
+        print(Fore.YELLOW + string, (80 - len(string)) * '-')
+        pe = torch.zeros(maxSeqLen, mDim)
+        position = torch.arange(0, maxSeqLen, dtype = torch.float).unsqueeze(1)
+        print(Fore.BLUE + 'Positions:')
+        print(position)
+        # divTerm[i] = exp(-ln(10000) * i / d_model),
+        divisonTerm = torch.exp(torch.arange(0, mDim, 2).float() * -(math.log(10000.0) / mDim))
+        pe[:, 0::2] = torch.sin(position * divisonTerm)
+        pe[:, 1::2] = torch.cos(position * divisonTerm)
+        print(Fore.BLUE + 'New Positions:')
+        print(pe)
+        self.register_buffer('pe', pe.unsqueeze(0))
+
+    def forward(self, X: Tensor) -> Tensor:
+        '''
+                    ▲
+                   (+) <--------  Positional Embedding
+                    ▲
+
+        `Important`: We're not only Embedding using sin & cos but actually sending X
+        along with the positional encoding
+        '''
+        print(Fore.BLUE + 'X Shape:', Fore.RED + str(X.shape))
+        out = X + self.pe[:, :X.size(1)]
+        print(Fore.BLUE + 'Output Shape:', Fore.RED + str(out.shape))
+        print(out)
+        return out
+
+# Tests
+# pe = PositionalEmbedding(mDim, 10)
+# pe.forward(x)
 
 # Multi-Head Attention
 class MHA(nn.Module):
     def __init__(self, mDim: int, nHeads: int) -> None:
         '''
         Mult-head Attention Block is the `MOST` important block of the transformers
-        `mDim:` model dimension 
+        `mDim:` dimensionality of the model's input & output
         `nHeads:` number of heads 
         `Warning: mDim must be devisible by nHeads`
         '''
@@ -117,5 +198,41 @@ class MHA(nn.Module):
         # print(output)
         return output
 
-mha = MHA(mDim, nHeads)
-output = mha.forward(K, Q, V)
+# Tests
+# mha = MHA(mDim, nHeads)
+# output = mha.forward(K, Q, V)
+
+class EncoderLayer(nn.Module):
+    def __init__(self, mDim: int, nHeads: int, ffDim: int, dropout: float) -> None:
+        '''
+                  ...  
+                   ▲ 
+        ┌──────────────────────┐
+        │      Add & Norm      │
+        └──────────────────────┘
+                   ▲ 
+        ┌──────────────────────┐
+        │Position-Wise Feed FW │
+        └──────────────────────┘
+                   ▲ 
+        ┌──────────────────────┐
+        │      Add & Norm      │
+        └──────────────────────┘
+                   ▲ 
+        ┌──────────────────────┐
+        │  Multi-Head Attention│ <--- Q, K, V
+        └──────────────────────┘
+        '''
+        super(EncoderLayer).__init__()
+        self.selfAttention = MHA(mDim, nHeads)
+        self.norm1 = nn.LayerNorm(mDim)
+        self.feedForward = PerPositionFeedForward(mDim, ffDim)
+        self.norm2 = nn.LayerNorm(mDim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, X: Tensor, mask: Tensor | None) -> Tensor:
+        attnOutput = self.selfAttention(X)
+        X = self.norm1(X + self.dropout(attnOutput)) # We do this beause of residual connections
+        ffOutput = self.feedForward(X)
+        X = self.norm2(X + self.dropout(ffOutput))
+        return X
