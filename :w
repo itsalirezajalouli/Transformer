@@ -1,0 +1,60 @@
+# Imports
+import math
+import copy
+import torch
+from torch.functional import Tensor
+import torch.nn as nn
+import torch.optim as optim
+import torch.utils.data as data
+from colorama import Fore, Back, Style, init
+init(autoreset = True)
+
+# Hyper-Parameters & Fake Tensors to test
+batchSize = 2
+seqLength = 5
+mDim = 8
+nHeads = 2
+Q = torch.randn(batchSize, seqLength, mDim)
+K = torch.randn(batchSize, seqLength, mDim)
+V = torch.randn(batchSize, seqLength, mDim)
+print(Fore.BLUE + 'Shape of K, Q, V Tensors:', Fore.RED + str(Q.shape))
+
+# Multi-Head Attention
+class MHA(nn.Module):
+    def __init__(self, mDim: int, nHeads: int) -> None:
+        '''
+        Mult-head Attention Block is the `MOST` important block of the transformers
+        `mDim:` model dimension 
+        `nHeads:` number of heads 
+        `Warning: mDim must be devisible by nHeads`
+        '''
+        super().__init__()
+        assert mDim % nHeads == 0, 'mDim must be devisible by nHeads'
+        # Initialize dimentions
+        self.mDim = mDim
+        self.nHeads = nHeads
+        self.dimKQV = mDim // nHeads
+        # Linear layers
+        self.wQ = nn.Linear(mDim, mDim)
+        self.wK = nn.Linear(mDim, mDim)
+        self.wV = nn.Linear(mDim, mDim)
+        self.wO = nn.Linear(mDim, mDim)
+
+    def scaledDotProductAttention(self, K: Tensor, Q: Tensor, V: Tensor, 
+                                  mask: Tensor | None = None):
+        ''' Attention(Q, K, V) = Softmax((Q · K^T) / √d_k) · V'''
+        attentionScores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.dimKQV)
+        print(Fore.BLUE + 'Attention Score Shape:', Fore.RED + str(attentionScores.shape))
+
+        attentionProbs = torch.softmax(attentionScores, dim = -1)
+        print(Fore.BLUE + 'Attention Probabilty (Softmax) Shape:', 
+              Fore.RED + str(attentionProbs.shape))
+
+        print(attentionProbs)
+        if mask is not None:
+            attentionScores = attentionScores.masked_fill(mask == 0, -torch.inf)
+
+        output = torch.matmul(attentionProbs, V)
+
+mha = MHA(mDim, nHeads)
+mha.scaledDotProductAttention(K, Q, V)
