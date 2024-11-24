@@ -153,12 +153,18 @@ class MHA(nn.Module):
 
     def splitHeads(self, X: Tensor, who: str) -> Tensor:
         '''Reshapes the `input` to have `number of heads` as a dimension'''
-        string = f'[Spliting Heads for {who}]'
-        print(Fore.CYAN + string, (80 - len(string)) * '-')
-        print(Fore.BLUE + 'Input X Shape:', Fore.RED + str(X.shape))
         batchSize, seqLength, _ = X.size()
         reshapedX = x.view(batchSize, seqLength, self.nHeads, self.dimKQV).transpose(1, 2)
-        print(Fore.BLUE + 'Reshped X Shape:', Fore.RED + str(reshapedX.shape))
+        string = f'[Spliting Heads for {who}]'
+        print(Fore.MAGENTA + string, (80 - len(string)) * '-')
+        input = Fore.CYAN + str(list(X.shape))
+        reXStr = Fore.CYAN + str(list(reshapedX.shape))
+        outStr = f'''
+            {reXStr}
+                 ▲
+            {who} : {input}
+        '''
+        print(outStr)
         return reshapedX
 
     def combineHeads(self, X: Tensor) -> Tensor:
@@ -223,16 +229,114 @@ class EncoderLayer(nn.Module):
         │  Multi-Head Attention│ <--- Q, K, V
         └──────────────────────┘
         '''
-        super(EncoderLayer).__init__()
+        super(EncoderLayer, self).__init__()
         self.selfAttention = MHA(mDim, nHeads)
         self.norm1 = nn.LayerNorm(mDim)
         self.feedForward = PerPositionFeedForward(mDim, ffDim)
         self.norm2 = nn.LayerNorm(mDim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, X: Tensor, mask: Tensor | None) -> Tensor:
-        attnOutput = self.selfAttention(X)
+    def forward(self, X: Tensor, mask: Tensor | None = None) -> Tensor:
+        string = '[ENCODER LAYER FORWARD]' 
+        print(Fore.YELLOW + string, (80 - len(string)) * '-')
+        print(Fore.BLUE + 'Input X Shape:', Fore.RED + str(X.shape))
+        attnOutput = self.selfAttention(X, X, X, mask)
         X = self.norm1(X + self.dropout(attnOutput)) # We do this beause of residual connections
         ffOutput = self.feedForward(X)
         X = self.norm2(X + self.dropout(ffOutput))
         return X
+
+# Tests
+enc = EncoderLayer(mDim, nHeads, ffDim, 0.2)
+output = enc.forward(x) 
+print(output)
+
+# Decoder Layer
+class DecoderLayer(nn.Module):
+    def __init__(self, mDim: int, nHeads: int, ffDim: int, dropout: float) -> None:
+        '''
+                      ...  
+                       ▲ 
+            ┌──────────────────────┐
+            │      Add & Norm      │
+            └──────────────────────┘
+                       ▲ 
+            ┌──────────────────────┐
+            │Position-Wise Feed FW │
+            └──────────────────────┘
+                       ▲ 
+            ┌──────────────────────┐
+            │      Add & Norm      │
+            └──────────────────────┘
+                       ▲ 
+            ┌──────────────────────┐
+            │   Cross-Attention    │ <--- K, V (from encoder)
+            └──────────────────────┘
+                       ▲ 
+            ┌──────────────────────┐
+            │      Add & Norm      │
+            └──────────────────────┘
+                       ▲ 
+            ┌──────────────────────┐
+            │Masked Self-Attention │ <--- Q, K, V
+            └──────────────────────┘
+        '''
+        super(DecoderLayer, self).__init__()
+        self.selfAttention = MHA(mDim, nHeads)
+        self.norm1 = nn.LayerNorm(mDim)
+        self.crossAttention = MHA(mDim, nHeads)
+        self.norm2 = nn.LayerNorm(mDim)
+        self.feedForward = PerPositionFeedForward(mDim, ffDim)
+        self.norm3 = nn.LayerNorm(mDim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, X: Tensor, encOut: Tensor | None = None,
+                tgtMask: Tensor | None = None,
+                srcMask: Tensor | None = None) -> Tensor:
+        attnOutput = self.selfAttention(X, X, X, tgtMask)
+        X = self.norm1(X + self.dropout(attnOutput))
+        crossAttnOut = self.crossAttention(X, )
+        X = self.norm2(X + self.dropout(crossAttnOut))
+        ffOutput = self.feedForward(X)
+        X = self.norm3(X + self.dropout(ffOutput))
+        return X
+
+# Transformers... Assemble!
+class Transformer(nn.Module):
+    def __init__(self, mDim: int, nHeads: int, ffDim: int, dropout: float, maxSeqLen: int,
+                 srcVocabSize: int, tgtVocabSize: int, numLayers: int) -> None:
+        super(Transformer, self).__init__()
+        self.encoderEmbedding = nn.Embedding(srcVocabSize, mDim)
+        self.decoderEmbedding = nn.Embedding(tgtVocabSize, mDim)
+        self.positionalEncoding = PositionalEmbedding(mDim, maxSeqLen)
+
+        self.encoderLayers = nn.ModuleList([EncoderLayer(mDim, nHeads, ffDim, dropout) for _ in range(numLayers)])
+        self.decoderLayers = nn.ModuleList([DecoderLayer(mDim, nHeads, ffDim, dropout) for _ in range(numLayers)])
+
+        self.fc = nn.Linear(mDim, tgtVocabSize)
+        self.dropout = nn.Dropout(dropout)
+
+    def generateMask(self, src: Tensor, tgt: Tensor) -> tuple[Tensor, Tensor]:
+        srcMask = (src != 0).unsqueeze(1).unsqueeze(2)
+        tgtMask = (src != 0).unsqueeze(1).unsqueeze(3)
+        seqLength = tgt.size(1)
+        noPeakMask = (1 - torch.triu(torch.ones(1, seqLength, seqLength), diagonal = 1)).bool()
+        tgtMask = tgtMask & noPeakMask
+        return srcMask, tgtMask
+
+    def forward(self, src: Tensor, tgt: Tensor) -> tuple[Tensor, Tensor]:
+        srcMask, tgtMask = self.generateMask(src, tgt)
+        srcEmbedded = self.dropout(self.positionalEncoding(self.encoderEmbedding(src)))
+        tgtEmbedded = self.dropout(self.positionalEncoding(self.encoderEmbedding(tgt)))
+
+        encOutput = srcEmbedded
+        for encLayer in self.encoderLayers:
+            encOutput = encLayer(encOutput, srcMask)
+
+        decOutput = tgtEmbedded
+        for decLayer in self.decoderLayers:
+            decOutput = decLayer(decOutput, encOutput, srcMask, tgtMask)
+
+        output = self.fc(decOutput)
+        return output
+
