@@ -2,11 +2,16 @@
 import math
 import copy
 import torch
-from torch.functional import Tensor
+import pandas as pd
 import torch.nn as nn
+from utils import runEpoch
 import torch.optim as optim
 import torch.utils.data as data
+from torch.functional import Tensor
 from colorama import Fore, Back, Style, init
+from torch.utils.data import Dataset, DataLoader 
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score
 init(autoreset = True)
 
 # Hyper-Parameters & Fake Tensors to test
@@ -339,4 +344,61 @@ class Transformer(nn.Module):
 
         output = self.fc(decOutput)
         return output
+
+# Loading Datasets
+csvPath = './time_series_15min_singleindex.csv'
+df = pd.read_csv(csvPath)
+featureList = ['utc_timestamp', 'DE_solar_generation_actual', 'DE_wind_onshore_profile',
+               'DE_solar_generation_actual', 'DE_solar_profile', 'DE_wind_profile',
+               'DE_wind_offshore_profile', 'DE_load_actual_entsoe_transparency',
+               'DE_50hertz_wind_onshore_generation_actual', 
+               'DE_transnetbw_wind_onshore_generation_actual'
+               ]
+targetList = ['DE_wind_generation_actual', 'DE_wind_onshore_generation_actual',
+              'DE_wind_offshore_generation_actual']
+features = df[featureList]
+targets = df[targetList]
+features = df[featureList].apply(pd.to_numeric, errors='coerce')
+targets = df[targetList].apply(pd.to_numeric, errors='coerce')
+features.fillna(0, inplace=True)  
+targets.fillna(0, inplace=True)
+
+# Data Split
+trainFeatures, testFeatures, trainTargets, testTargets = train_test_split(features, targets, test_size = 0.2, random_state = 1)
+testFeatures, validFeatures, testTargets, validTargets = train_test_split(testFeatures, testTargets, test_size = 0.5, random_state = 1)
+
+# Dataset class for tabular data
+class TabularDataset(Dataset):
+    def __init__(self, features, targets):
+        self.features = torch.tensor(features.values, dtype = torch.float32)
+        self.targets = torch.tensor(targets.values, dtype = torch.float32)
+
+    def __len__(self):
+        return len(self.features)
+
+    def __getitem__(self, idx):
+        return self.features[idx], self.targets[idx]
+
+# Create datasets
+trainSet = TabularDataset(trainFeatures, trainTargets)
+valSet = TabularDataset(validFeatures, validTargets)
+
+# DataLoader parameters
+batchSize = 32
+
+# Create DataLoaders
+trainLoader = DataLoader(trainSet, batch_size=batchSize, shuffle = True)
+valLoader = DataLoader(valSet, batch_size=batchSize, shuffle = True)
+
+model = Transformer(mDim, nHeads, ffDim, 0.1, seqLength, 1000, 100, 10)
+lossFunc = nn.MSELoss() 
+criterion = optim.Adam(model.parameters(), lr = 0.0001)
+scoreFuncs = {'Accuracy' : accuracy_score,
+               'Recall' : lambda y_true, y_pred: recall_score(y_true, y_pred, average = 'macro'),
+               'F1' : lambda y_true, y_pred: f1_score(y_true, y_pred, average = 'macro'),
+               'Precision': lambda y_true, y_pred: precision_score(y_true, y_pred, average = 'macro')}
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+(trainResults, testResults, _) = runEpoch(model, trainLoader, valLoader, lossFunc,
+                                          criterion, scoreFuncs, 100, device)
+print(testResults)
 
